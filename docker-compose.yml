@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  file-decompressor:
+    build: .
+    container_name: file-auto-decompressor
+    volumes:
+      - ${DOWNLOADS_DIR:-/path/to/downloads}:/downloads
+      - ${OUTPUT_DIR:-/path/to/output}:/download_files
+      - ${LOGS_DIR:-./logs}:/logs
+    restart: always

@@ -1,0 +1,4 @@
+watchdog>=2.1.9
+py7zr>=0.20.0
+rarfile>=4.0
+pathlib>=1.0.1

@@ -1,0 +1,3 @@
+"""
+File Auto-Decompressor package.
+"""
