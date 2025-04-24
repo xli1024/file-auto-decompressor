@@ -95,11 +95,12 @@ docker run -d \
 
 ### Using Docker Compose
 
-1. Create a `.env` file with your directory paths:
-   ```
-   DOWNLOADS_DIR=/path/to/downloads
-   OUTPUT_DIR=/path/to/output
-   LOGS_DIR=/path/to/logs
+1. Edit the docker-compose.yml file to specify your directory paths:
+   ```yaml
+   volumes:
+     - /path/to/downloads:/downloads        # Change this to your downloads directory
+     - /path/to/output:/download_files      # Change this to your output directory
+     - ./logs:/logs                         # Local logs directory
    ```
 
 2. Run with Docker Compose:

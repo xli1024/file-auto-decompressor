@@ -5,7 +5,7 @@ services:
     build: .
     container_name: file-auto-decompressor
     volumes:
-      - ${DOWNLOADS_DIR:-/path/to/downloads}:/downloads
-      - ${OUTPUT_DIR:-/path/to/output}:/download_files
-      - ${LOGS_DIR:-./logs}:/logs
+      - /path/to/downloads:/downloads        # Change this to your downloads directory
+      - /path/to/output:/download_files      # Change this to your output directory
+      - ./logs:/logs                         # Local logs directory
     restart: always
