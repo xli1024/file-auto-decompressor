@@ -87,7 +87,6 @@ Run the container with default settings:
 docker run -d \
   -v /path/to/downloads:/downloads \
   -v /path/to/output:/download_files \
-  -v /path/to/logs:/logs \
   --restart always \
   --name file-auto-decompressor \
   file-auto-decompressor
@@ -100,7 +99,6 @@ docker run -d \
    volumes:
      - /path/to/downloads:/downloads        # Change this to your downloads directory
      - /path/to/output:/download_files      # Change this to your output directory
-     - ./logs:/logs                         # Local logs directory
    ```
 
 2. Run with Docker Compose:
@@ -116,27 +114,6 @@ The application can be configured using command-line arguments:
 - `--output-dir`: Directory where decompressed files will be saved (default: /download_files)
 - `--log-dir`: Directory where log files will be stored (default: None, logs to console only)
 - `--log-level`: Logging level (default: INFO, options: DEBUG, INFO, WARNING, ERROR, CRITICAL)
-
-## Docker Hub
-
-To push the image to Docker Hub:
-
-1. Create a Docker Hub account if you don't have one.
-
-2. Log in to Docker Hub:
-   ```bash
-   docker login
-   ```
-
-3. Tag your image:
-   ```bash
-   docker tag file-auto-decompressor <your-dockerhub-username>/file-auto-decompressor:latest
-   ```
-
-4. Push the image:
-   ```bash
-   docker push <your-dockerhub-username>/file-auto-decompressor:latest
-   ```
 
 ## License
 
