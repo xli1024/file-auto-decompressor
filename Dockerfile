@@ -6,7 +6,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     p7zip-full \
-    unrar \
+    unrar-free \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
