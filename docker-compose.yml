@@ -7,4 +7,14 @@ services:
     volumes:
       - /path/to/downloads:/downloads        # Change this to your downloads directory
       - /path/to/output:/download_files      # Change this to your output directory
+    environment:
+      # Comma-separated list of default passwords to try for password-protected archives
+      # Example: DEFAULT_PASSWORDS=password123,admin,123456
+      - DEFAULT_PASSWORDS=${DEFAULT_PASSWORDS:-}
+    command: >
+      python main.py
+      --input-dir /downloads
+      --output-dir /download_files
+      --default-passwords "${DEFAULT_PASSWORDS}"
+      --log-level INFO
     restart: always

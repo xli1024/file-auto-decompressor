@@ -28,14 +28,16 @@ except ImportError:
 class Decompressor:
     """Class to handle decompression of various file formats."""
 
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, default_passwords=None):
         """
         Initialize the decompressor.
         
         Args:
             output_dir (str): Directory where decompressed files will be saved
+            default_passwords (list): List of default passwords to try for password-protected archives
         """
         self.output_dir = Path(output_dir)
+        self.default_passwords = default_passwords or []
         self.logger = logging.getLogger(__name__)
         
         # Ensure output directory exists
@@ -76,7 +78,7 @@ class Decompressor:
 
     def _decompress_zip(self, file_path):
         """
-        Decompress a ZIP file.
+        Decompress a ZIP file, trying default passwords if needed.
         
         Args:
             file_path (Path): Path to the ZIP file
@@ -89,19 +91,35 @@ class Decompressor:
             extract_dir = self.output_dir / file_path.stem
             os.makedirs(extract_dir, exist_ok=True)
             
-            with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                # Check if the zip file is password protected
-                for zip_info in zip_ref.infolist():
-                    if zip_info.flag_bits & 0x1:
-                        self.logger.warning(f"ZIP file is password protected: {file_path}")
-                        return False
+            # First try without password
+            try:
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(path=extract_dir)
+                self.logger.info(f"Successfully decompressed ZIP file (no password): {file_path}")
+                return True
+            except (RuntimeError, zipfile.BadZipFile) as e:
+                # Check if it's a password error
+                if "Bad password" in str(e) or "password required" in str(e).lower():
+                    self.logger.info(f"ZIP file requires password: {file_path}")
+                    # Try with default passwords
+                    for password in self.default_passwords:
+                        try:
+                            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                                zip_ref.extractall(path=extract_dir, pwd=password.encode('utf-8'))
+                            self.logger.info(f"Successfully decompressed ZIP file with password: {file_path} (password: {password})")
+                            return True
+                        except (RuntimeError, zipfile.BadZipFile) as pwd_e:
+                            if "Bad password" in str(pwd_e):
+                                self.logger.debug(f"Failed password attempt for {file_path}: {password}")
+                                continue
+                            else:
+                                raise pwd_e
+                    
+                    self.logger.warning(f"Failed to decompress ZIP file {file_path}: exhausted all {len(self.default_passwords)} default passwords")
+                    return False
+                else:
+                    raise e
                 
-                # Extract all contents
-                zip_ref.extractall(path=extract_dir)
-                
-            self.logger.info(f"Successfully decompressed ZIP file: {file_path}")
-            return True
-            
         except zipfile.BadZipFile:
             self.logger.error(f"Corrupted ZIP file: {file_path}")
             return False
@@ -111,7 +129,7 @@ class Decompressor:
 
     def _decompress_rar(self, file_path):
         """
-        Decompress a RAR file.
+        Decompress a RAR file, trying default passwords if needed.
         
         Args:
             file_path (Path): Path to the RAR file
@@ -128,18 +146,38 @@ class Decompressor:
             extract_dir = self.output_dir / file_path.stem
             os.makedirs(extract_dir, exist_ok=True)
             
-            with rarfile.RarFile(file_path) as rar_ref:
-                # Check if the rar file is password protected
-                if rar_ref.needs_password():
-                    self.logger.warning(f"RAR file is password protected: {file_path}")
+            # First try without password
+            try:
+                with rarfile.RarFile(file_path) as rar_ref:
+                    if not rar_ref.needs_password():
+                        rar_ref.extractall(path=extract_dir)
+                        self.logger.info(f"Successfully decompressed RAR file (no password): {file_path}")
+                        return True
+                    else:
+                        raise rarfile.PasswordRequired("Password required")
+            except (rarfile.PasswordRequired, rarfile.BadRarFile) as e:
+                if "password" in str(e).lower() or isinstance(e, rarfile.PasswordRequired):
+                    self.logger.info(f"RAR file requires password: {file_path}")
+                    # Try with default passwords
+                    for password in self.default_passwords:
+                        try:
+                            with rarfile.RarFile(file_path) as rar_ref:
+                                rar_ref.setpassword(password)
+                                rar_ref.extractall(path=extract_dir)
+                            self.logger.info(f"Successfully decompressed RAR file with password: {file_path} (password: {password})")
+                            return True
+                        except (rarfile.PasswordRequired, rarfile.BadRarFile) as pwd_e:
+                            if "password" in str(pwd_e).lower():
+                                self.logger.debug(f"Failed password attempt for {file_path}: {password}")
+                                continue
+                            else:
+                                raise pwd_e
+                    
+                    self.logger.warning(f"Failed to decompress RAR file {file_path}: exhausted all {len(self.default_passwords)} default passwords")
                     return False
+                else:
+                    raise e
                 
-                # Extract all contents
-                rar_ref.extractall(path=extract_dir)
-                
-            self.logger.info(f"Successfully decompressed RAR file: {file_path}")
-            return True
-            
         except rarfile.BadRarFile:
             self.logger.error(f"Corrupted RAR file: {file_path}")
             return False
@@ -149,7 +187,7 @@ class Decompressor:
 
     def _decompress_7z(self, file_path):
         """
-        Decompress a 7z file.
+        Decompress a 7z file, trying default passwords if needed.
         
         Args:
             file_path (Path): Path to the 7z file
@@ -166,18 +204,37 @@ class Decompressor:
             extract_dir = self.output_dir / file_path.stem
             os.makedirs(extract_dir, exist_ok=True)
             
-            with py7zr.SevenZipFile(file_path, mode='r') as z:
-                # Check if the 7z file is password protected
-                if z.needs_password():
-                    self.logger.warning(f"7z file is password protected: {file_path}")
+            # First try without password
+            try:
+                with py7zr.SevenZipFile(file_path, mode='r') as z:
+                    if not z.needs_password():
+                        z.extractall(path=extract_dir)
+                        self.logger.info(f"Successfully decompressed 7z file (no password): {file_path}")
+                        return True
+                    else:
+                        raise py7zr.PasswordRequired("Password required")
+            except (py7zr.PasswordRequired, py7zr.Bad7zFile) as e:
+                if "password" in str(e).lower() or isinstance(e, py7zr.PasswordRequired):
+                    self.logger.info(f"7z file requires password: {file_path}")
+                    # Try with default passwords
+                    for password in self.default_passwords:
+                        try:
+                            with py7zr.SevenZipFile(file_path, mode='r', password=password) as z:
+                                z.extractall(path=extract_dir)
+                            self.logger.info(f"Successfully decompressed 7z file with password: {file_path} (password: {password})")
+                            return True
+                        except (py7zr.PasswordRequired, py7zr.Bad7zFile) as pwd_e:
+                            if "password" in str(pwd_e).lower():
+                                self.logger.debug(f"Failed password attempt for {file_path}: {password}")
+                                continue
+                            else:
+                                raise pwd_e
+                    
+                    self.logger.warning(f"Failed to decompress 7z file {file_path}: exhausted all {len(self.default_passwords)} default passwords")
                     return False
+                else:
+                    raise e
                 
-                # Extract all contents
-                z.extractall(path=extract_dir)
-                
-            self.logger.info(f"Successfully decompressed 7z file: {file_path}")
-            return True
-            
         except py7zr.Bad7zFile:
             self.logger.error(f"Corrupted 7z file: {file_path}")
             return False
