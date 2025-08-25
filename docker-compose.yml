@@ -11,10 +11,4 @@ services:
       # Comma-separated list of default passwords to try for password-protected archives
       # Example: DEFAULT_PASSWORDS=password123,admin,123456
       - DEFAULT_PASSWORDS=${DEFAULT_PASSWORDS:-}
-    command: >
-      python main.py
-      --input-dir /downloads
-      --output-dir /download_files
-      --default-passwords "${DEFAULT_PASSWORDS}"
-      --log-level INFO
     restart: always

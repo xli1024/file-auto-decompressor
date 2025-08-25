@@ -4,6 +4,7 @@ File system monitoring for detecting new compressed files.
 import os
 import time
 import logging
+import threading
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -29,7 +30,29 @@ class CompressedFileHandler(FileSystemEventHandler):
         self.decompressor = Decompressor(output_dir, default_passwords or [])
         self.logger = logging.getLogger(__name__)
         self.supported_extensions = ['.zip', '.rar', '.7z']
-        self.processing_files = {}  # Track files being processed with their last seen sizes
+        
+        # Companion file extensions used by various downloaders
+        self.companion_extensions = [
+            '.aria2',      # aria2 downloader
+            '.part',       # wget, curl, Firefox
+            '.tmp',        # various tools
+            '.crdownload', # Chrome downloads
+            '.download',   # Safari, some tools  
+            '.partial',    # some downloaders
+            '.!ut',        # µTorrent
+            '.bc!',        # BitComet
+        ]
+        
+        # Parking queue for files waiting for download completion
+        self.parked_files = {}  # {file_path: park_timestamp}
+        self.max_parked_files = 50
+        self.park_check_interval = 30  # seconds
+        self.parked_files_lock = threading.Lock()
+        self.shutdown_event = threading.Event()
+        
+        # Start background thread for monitoring parked files
+        self.parked_monitor_thread = threading.Thread(target=self._monitor_parked_files, daemon=True)
+        self.parked_monitor_thread.start()
         
     def on_created(self, event):
         """
@@ -52,17 +75,53 @@ class CompressedFileHandler(FileSystemEventHandler):
     
     def _process_file(self, file_path):
         """
-        Process a compressed file after ensuring it's stable (not being downloaded).
+        Process a compressed file with non-blocking logic for downloads.
         
         Args:
             file_path (Path): Path to the compressed file
         """
         try:
-            # Check if file is stable before processing
-            if not self._wait_for_file_stability(file_path):
-                self.logger.warning(f"File {file_path} never stabilized, skipping")
+            # Check if file exists and has content
+            if not file_path.exists():
+                self.logger.warning(f"File {file_path} no longer exists")
                 return
             
+            file_size = file_path.stat().st_size
+            if file_size == 0:
+                self.logger.info(f"File {file_path} is empty, skipping")
+                return
+            
+            # Grace period: wait for companion files to potentially appear
+            self.logger.info(f"Waiting 10 seconds for potential companion files to appear for {file_path}")
+            time.sleep(10)
+            
+            # Check if file still exists after grace period
+            if not file_path.exists():
+                self.logger.warning(f"File {file_path} was deleted during grace period")
+                return
+            
+            # Check for companion files
+            companion_files = self._get_companion_files(file_path)
+            
+            if companion_files:
+                # File has companions - park it for later processing
+                self._park_file(file_path)
+            else:
+                # No companions - process immediately
+                self.logger.info(f"No companion files found for {file_path}, processing immediately")
+                self._decompress_file(file_path)
+                
+        except Exception as e:
+            self.logger.error(f"Error processing file {file_path}: {str(e)}")
+    
+    def _decompress_file(self, file_path):
+        """
+        Decompress a file and remove the original.
+        
+        Args:
+            file_path (Path): Path to the compressed file
+        """
+        try:
             # Attempt to decompress the file
             success = self.decompressor.decompress(file_path)
             
@@ -71,69 +130,141 @@ class CompressedFileHandler(FileSystemEventHandler):
                 self.decompressor.remove_original(file_path)
             else:
                 self.logger.warning(f"Failed to decompress {file_path}, original file not removed")
-                
         except Exception as e:
-            self.logger.error(f"Error processing file {file_path}: {str(e)}")
+            self.logger.error(f"Error decompressing file {file_path}: {str(e)}")
     
-    def _wait_for_file_stability(self, file_path, stability_duration=30, check_interval=5, max_retries=3):
+    def _park_file(self, file_path):
         """
-        Wait for a file to be stable (not changing size) before processing.
+        Park a file that has companion files (download in progress).
         
         Args:
-            file_path (Path): Path to the file to check
-            stability_duration (int): Seconds the file size must remain unchanged
-            check_interval (int): Seconds between size checks
-            max_retries (int): Maximum number of stability check attempts
-            
-        Returns:
-            bool: True if file is stable, False otherwise
+            file_path (Path): Path to the file to park
         """
-        for retry in range(max_retries):
+        with self.parked_files_lock:
+            # Check if parking queue is full
+            if len(self.parked_files) >= self.max_parked_files:
+                # Remove oldest parked file to make room
+                oldest_file = min(self.parked_files.items(), key=lambda x: x[1])
+                del self.parked_files[oldest_file[0]]
+                self.logger.warning(f"Parking queue full, removed oldest file: {oldest_file[0]}")
+            
+            # Park the file with current timestamp
+            current_time = time.time()
+            self.parked_files[file_path] = current_time
+            
+            companion_files = self._get_companion_files(file_path)
+            self.logger.info(f"Parked file {file_path} (companions: {[str(f) for f in companion_files]}) - queue size: {len(self.parked_files)}")
+    
+    def _monitor_parked_files(self):
+        """
+        Background thread to monitor parked files and process completed downloads.
+        """
+        self.logger.info("Started background thread for monitoring parked files")
+        
+        while not self.shutdown_event.is_set():
             try:
-                # Check if file exists and has size > 0
-                if not file_path.exists():
-                    self.logger.warning(f"File {file_path} no longer exists")
-                    return False
+                # Wait for check interval or shutdown signal
+                if self.shutdown_event.wait(self.park_check_interval):
+                    break
                 
-                initial_size = file_path.stat().st_size
-                if initial_size == 0:
-                    self.logger.info(f"File {file_path} is empty, waiting for content...")
-                    time.sleep(check_interval)
+                # Check parked files
+                self._check_parked_files()
+                
+            except Exception as e:
+                self.logger.error(f"Error in parked files monitor: {str(e)}")
+                time.sleep(5)  # Brief pause before retrying
+        
+        self.logger.info("Background parked files monitor stopped")
+    
+    def _check_parked_files(self):
+        """
+        Check all parked files and process any that are ready.
+        """
+        with self.parked_files_lock:
+            if not self.parked_files:
+                return
+            
+            # Create a copy to avoid modification during iteration
+            parked_files_copy = dict(self.parked_files)
+        
+        files_to_unpark = []
+        current_time = time.time()
+        max_wait_seconds = 3 * 3600  # 3 hours
+        
+        # Check each parked file (in chronological order - oldest first)
+        for file_path, park_time in sorted(parked_files_copy.items(), key=lambda x: x[1]):
+            try:
+                # Check if file still exists
+                if not file_path.exists():
+                    self.logger.info(f"Parked file {file_path} was deleted, removing from queue")
+                    files_to_unpark.append(file_path)
                     continue
                 
-                self.logger.info(f"Monitoring file {file_path} for stability (size: {initial_size} bytes)")
+                # Check if timeout reached
+                elapsed_seconds = current_time - park_time
+                if elapsed_seconds > max_wait_seconds:
+                    self.logger.warning(f"Parked file {file_path} timed out after {elapsed_seconds/3600:.1f} hours, removing from queue")
+                    files_to_unpark.append(file_path)
+                    continue
                 
-                # Monitor file size for stability_duration
-                stable_time = 0
-                last_size = initial_size
+                # Check if companions still exist
+                companion_files = self._get_companion_files(file_path)
                 
-                while stable_time < stability_duration:
-                    time.sleep(check_interval)
+                if not companion_files:
+                    # Download completed - unpark and process
+                    self.logger.info(f"Parked file {file_path} download completed (parked for {elapsed_seconds:.1f} seconds)")
+                    files_to_unpark.append(file_path)
                     
-                    if not file_path.exists():
-                        self.logger.warning(f"File {file_path} was deleted during stability check")
-                        return False
-                    
-                    current_size = file_path.stat().st_size
-                    
-                    if current_size != last_size:
-                        self.logger.info(f"File {file_path} size changed: {last_size} -> {current_size} bytes, restarting stability check")
-                        stable_time = 0
-                        last_size = current_size
-                    else:
-                        stable_time += check_interval
-                        self.logger.debug(f"File {file_path} stable for {stable_time}/{stability_duration} seconds")
+                    # Process the file in a separate thread to avoid blocking the monitor
+                    processing_thread = threading.Thread(target=self._decompress_file, args=(file_path,))
+                    processing_thread.start()
+                else:
+                    # Still downloading, log progress if significant time elapsed
+                    if elapsed_seconds > 300 and int(elapsed_seconds) % 300 == 0:  # Every 5 minutes
+                        remaining_hours = (max_wait_seconds - elapsed_seconds) / 3600
+                        self.logger.info(f"Parked file {file_path} still downloading (companions: {len(companion_files)}, remaining: {remaining_hours:.1f}h)")
                 
-                self.logger.info(f"File {file_path} is stable (size: {last_size} bytes), ready for processing")
-                return True
-                
-            except OSError as e:
-                self.logger.warning(f"Error checking file {file_path} stability (attempt {retry + 1}/{max_retries}): {str(e)}")
-                if retry < max_retries - 1:
-                    time.sleep(check_interval)
-                
-        self.logger.error(f"Failed to verify stability of {file_path} after {max_retries} attempts")
-        return False
+            except Exception as e:
+                self.logger.error(f"Error checking parked file {file_path}: {str(e)}")
+                files_to_unpark.append(file_path)  # Remove problematic files
+        
+        # Remove unparked files from the queue
+        with self.parked_files_lock:
+            for file_path in files_to_unpark:
+                self.parked_files.pop(file_path, None)
+        
+        if files_to_unpark:
+            self.logger.info(f"Unparked {len(files_to_unpark)} files, {len(self.parked_files)} remain in queue")
+    
+    def shutdown(self):
+        """
+        Shutdown the handler and stop background threads.
+        """
+        self.logger.info("Shutting down compressed file handler")
+        self.shutdown_event.set()
+        if self.parked_monitor_thread.is_alive():
+            self.parked_monitor_thread.join(timeout=5)
+    
+    def _get_companion_files(self, file_path):
+        """
+        Find companion files that indicate a download is in progress.
+        
+        Args:
+            file_path (Path): Path to the target compressed file
+            
+        Returns:
+            list: List of companion file paths that exist
+        """
+        companion_files = []
+        
+        for extension in self.companion_extensions:
+            # Correct: append extension to full filename (e.g., movie.zip + .aria2 = movie.zip.aria2)
+            companion_path = Path(str(file_path) + extension)
+            if companion_path.exists():
+                companion_files.append(companion_path)
+        
+        return companion_files
+    
 
 
 class DirectoryMonitor:
@@ -190,6 +321,11 @@ class DirectoryMonitor:
         Stop monitoring the directory.
         """
         self.logger.info("Stopping directory monitor")
+        
+        # Shutdown the event handler and background threads
+        self.event_handler.shutdown()
+        
+        # Stop the observer
         self.observer.stop()
         self.observer.join()
     

@@ -57,12 +57,6 @@ def parse_arguments():
         help='Logging level (default: INFO)'
     )
     
-    parser.add_argument(
-        '--default-passwords',
-        type=str,
-        default='',
-        help='Comma-separated list of default passwords to try for password-protected archives (default: empty)'
-    )
     
     return parser.parse_args()
 
@@ -96,11 +90,12 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        # Parse default passwords
+        # Parse default passwords from environment variable
         default_passwords = []
-        if args.default_passwords:
-            default_passwords = [pwd.strip() for pwd in args.default_passwords.split(',') if pwd.strip()]
-            logger.info(f"Loaded {len(default_passwords)} default passwords")
+        env_passwords = os.getenv('DEFAULT_PASSWORDS', '')
+        if env_passwords:
+            default_passwords = [pwd.strip() for pwd in env_passwords.split(',') if pwd.strip()]
+            logger.info(f"Loaded {len(default_passwords)} default passwords from environment")
         
         # Create and start the directory monitor
         monitor = DirectoryMonitor(args.input_dir, args.output_dir, default_passwords)
